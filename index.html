@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>For My Valentine</title>
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000000; font-family: 'Segoe UI', sans-serif; }
+        #canvas-container { width: 100%; height: 100vh; display: block; }
+        
+        /* Màn hình chờ (Overlay) */
+        #start-screen {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.8);
+            display: flex; flex-direction: column; justify-content: center; align-items: center;
+            z-index: 999; cursor: pointer;
+            transition: opacity 1s;
+        }
+        #start-screen h1 {
+            color: #ff3366; font-size: 24px; text-transform: uppercase; letter-spacing: 2px;
+            animation: pulse 1.5s infinite;
+        }
+        #start-screen p { color: #fff; opacity: 0.7; margin-top: 10px; font-size: 14px; }
+
+        @keyframes pulse { 0% { transform: scale(1); } 50% { transform: scale(1.1); } 100% { transform: scale(1); } }
+
+        /* Giao diện chính */
+        #ui-layer {
+            position: absolute; bottom: 30px; width: 100%;
+            text-align: center; pointer-events: none; z-index: 100;
+            display: none; /* Ẩn lúc đầu, hiện sau khi Start */
+        }
+        
+        .guide { 
+            color: rgba(255, 255, 255, 0.9); 
+            font-size: 14px; margin-bottom: 10px; font-weight: 400;
+            text-shadow: 0 2px 4px rgba(0,0,0,0.8);
+        }
+        .guide span { font-size: 24px; vertical-align: middle; margin-left: 5px; }
+
+        /* Dòng chữ gõ máy (Typing Effect) */
+        #typing-text {
+            position: absolute; 
+            top: 75%; /* Nằm dưới video */
+            width: 100%; text-align: center;
+            color: #fff; font-size: 18px; font-weight: 600;
+            text-shadow: 0 0 10px #ff3366;
+            font-family: 'Courier New', Courier, monospace; /* Font kiểu máy đánh chữ */
+            pointer-events: none;
+            padding: 0 20px; box-sizing: border-box;
+        }
+
+        #camera-preview {
+            position: absolute; top: 15px; right: 15px;
+            width: 80px; height: 60px;
+            border: 1px solid rgba(255, 0, 51, 0.3); 
+            transform: scaleX(-1); opacity: 0.5; border-radius: 8px;
+            z-index: 99; display: none; /* Ẩn lúc đầu */
+        }
+        
+        #video-hidden { display: none; }
+    </style>
+</head>
+<body>
+    
+    <div id="start-screen" onclick="startSystem()">
+        <h1>Touch me </h1>
+        <p>(Chạm nhẹ vào màn hình để mở)</p>
+    </div>
+
+    <div id="ui-layer">
+        <div class="guide">Thử giơ nút like <span>👍</span> trước cam để...</div>
+    </div>
+
+    <div id="typing-text"></div>
+
+    <video id="video-hidden" src="uyen.mp4" playsinline loop muted crossorigin="anonymous"></video>
+    <div id="canvas-container"></div>
+    <video class="input_video" style="display:none"></video>
+    <canvas id="camera-preview"></canvas>
+
+    <script>
+        // ==========================================
+        // 1. CẤU HÌNH & TEXT
+        // ==========================================
+        const MUSIC_URL = "Download2.mp4";
+        // Thay đổi lời nhắn nhủ của cậu ở đây:
+        const LOVE_MESSAGE = "Happy va lung tung";
+        
+        let bgMusic = new Audio(MUSIC_URL);
+        bgMusic.loop = true; bgMusic.volume = 0.8;
+
+        const videoElement = document.getElementById('video-hidden');
+        let isSystemStarted = false;
+        
+        function createParticleTexture() {
+            const canvas = document.createElement('canvas');
+            canvas.width = 64; canvas.height = 64;
+            const ctx = canvas.getContext('2d');
+            const grad = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+            grad.addColorStop(0, 'rgba(255, 255, 255, 1)'); 
+            grad.addColorStop(0.2, 'rgba(255, 220, 230, 0.9)'); 
+            grad.addColorStop(0.5, 'rgba(255, 0, 50, 0.3)'); 
+            grad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+            ctx.fillStyle = grad;
+            ctx.fillRect(0, 0, 64, 64);
+            return new THREE.CanvasTexture(canvas);
+        }
+
+        const CONFIG = { particleCount: 5000 };
+
+        let scene, camera, renderer;
+        let particleSystem;
+        let videoMesh;
+        let state = 'HEART_IDLE'; 
+        
+        // Biến cho hiệu ứng gõ chữ
+        let typeIndex = 0;
+        let isTyping = false;
+
+        // ==========================================
+        // 2. KHỞI TẠO 3D
+        // ==========================================
+        function init3D() {
+            const container = document.getElementById('canvas-container');
+            scene = new THREE.Scene();
+            scene.fog = new THREE.FogExp2(0x1a0005, 0.0012); 
+
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth/window.innerHeight, 0.1, 3000);
+            updateCameraPosition();
+
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 3)); 
+            container.appendChild(renderer.domElement);
+
+            createParticles();
+            createVideoPlane();
+
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+            scene.add(ambientLight);
+            animate();
+        }
+
+        function updateCameraPosition() {
+            const aspect = window.innerWidth / window.innerHeight;
+            if (aspect < 1) camera.position.z = 230; 
+            else camera.position.z = 150;
+        }
+
+        // CÔNG THỨC TRÁI TIM CHUẨN (User thích bản này)
+        function getHeartPosition(scale) {
+            const t = Math.random() * Math.PI * 2;
+            const xBase = 16 * Math.pow(Math.sin(t), 3);
+            const yBase = 13 * Math.cos(t) - 5 * Math.cos(2*t) - 2 * Math.cos(3*t) - Math.cos(4*t);
+            const r = Math.pow(Math.random(), 0.4);
+            const normalizedY = (yBase + 17) / 30; 
+            const thicknessProfile = Math.pow(normalizedY, 0.7); 
+            const zMax = 6; 
+            const z = (Math.random() - 0.5) * 2 * zMax * thicknessProfile * r;
+
+            return { 
+                x: xBase * r * scale, 
+                y: yBase * r * scale, 
+                z: z * scale,
+                ratio: r 
+            };
+        }
+
+        function createParticles() {
+            const geometry = new THREE.BufferGeometry();
+            const positions = [];
+            const colors = [];
+            const targetHeart = [];
+            const targetExplode = [];
+            const speeds = [];
+
+            const colorCore = new THREE.Color(0xff88aa); 
+            const colorShell = new THREE.Color(0xd6002a); 
+
+            for (let i = 0; i < CONFIG.particleCount; i++) {
+                positions.push((Math.random()-0.5)*400, (Math.random()-0.5)*400, (Math.random()-0.5)*400);
+
+                // Heart
+                const posData = getHeartPosition(2.5);
+                targetHeart.push(posData.x, posData.y + 8, posData.z);
+
+                // Color
+                const finalColor = colorCore.clone().lerp(colorShell, posData.ratio);
+                finalColor.multiplyScalar(0.9 + Math.random() * 0.6);
+                colors.push(finalColor.r, finalColor.g, finalColor.b);
+
+                // Ring Explode
+                const theta = Math.random() * Math.PI * 2;
+                const phiExp = Math.acos(2 * Math.random() - 1);
+                const r = 70 + Math.random() * 60; 
+                targetExplode.push(r*Math.sin(phiExp)*Math.cos(theta), r*Math.sin(phiExp)*Math.sin(theta), r*Math.cos(phiExp));
+
+                speeds.push(0.015 + Math.random() * 0.04);
+            }
+
+            geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+            geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+            geometry.userData = { targetHeart, targetExplode, speeds };
+
+            const material = new THREE.PointsMaterial({
+                size: 2.6,
+                map: createParticleTexture(),
+                vertexColors: true,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false,
+                transparent: true,
+                opacity: 1.0
+            });
+
+            particleSystem = new THREE.Points(geometry, material);
+            scene.add(particleSystem);
+        }
+
+        function createVideoPlane() {
+            const videoTexture = new THREE.VideoTexture(videoElement);
+            videoTexture.minFilter = THREE.LinearFilter; videoTexture.magFilter = THREE.LinearFilter;
+            const geometry = new THREE.PlaneGeometry(48, 85); 
+            const material = new THREE.MeshBasicMaterial({ 
+                map: videoTexture, side: THREE.DoubleSide, transparent: true, opacity: 0,
+                blending: THREE.AdditiveBlending, depthWrite: false 
+            });
+            videoMesh = new THREE.Mesh(geometry, material);
+            videoMesh.position.set(0, 10, 0);
+            videoMesh.visible = false;
+            scene.add(videoMesh);
+        }
+
+        // ==========================================
+        // 3. LOGIC GÕ CHỮ (TYPING EFFECT)
+        // ==========================================
+        function typeWriter() {
+            if (typeIndex < LOVE_MESSAGE.length) {
+                document.getElementById("typing-text").innerHTML += LOVE_MESSAGE.charAt(typeIndex);
+                typeIndex++;
+                setTimeout(typeWriter, 100); // Tốc độ gõ 100ms
+            }
+        }
+
+        function resetTyping() {
+            document.getElementById("typing-text").innerHTML = "";
+            typeIndex = 0;
+            isTyping = false;
+        }
+
+        // ==========================================
+        // 4. ANIMATION LOOP
+        // ==========================================
+        function animate() {
+            requestAnimationFrame(animate);
+            const time = Date.now() * 0.001;
+            const positions = particleSystem.geometry.attributes.position.array;
+            const userData = particleSystem.geometry.userData;
+            const targets = (state === 'VIDEO_MODE') ? userData.targetExplode : userData.targetHeart;
+            const speeds = userData.speeds;
+            const globalSpeedMultiplier = (state === 'VIDEO_MODE') ? 1.5 : 0.8; 
+
+            for(let i = 0; i < CONFIG.particleCount; i++) {
+                const ix = i*3, iy = i*3+1, iz = i*3+2;
+                const speed = speeds[i] * globalSpeedMultiplier;
+                positions[ix] += (targets[ix] - positions[ix]) * speed;
+                positions[iy] += (targets[iy] - positions[iy]) * speed;
+                positions[iz] += (targets[iz] - positions[iz]) * speed;
+            }
+            particleSystem.geometry.attributes.position.needsUpdate = true;
+
+            if (state === 'HEART_IDLE') {
+                const beat = 1 + Math.sin(time * 2.5) * 0.08;
+                particleSystem.scale.set(beat, beat, beat);
+                particleSystem.rotation.y += 0.004; 
+                
+                if (videoMesh.material.opacity > 0) {
+                    videoMesh.material.opacity -= 0.1;
+                } else {
+                    videoMesh.visible = false;
+                    videoElement.pause();
+                }
+                
+                // Nếu quay về tim thì xóa chữ
+                if(document.getElementById("typing-text").innerHTML !== "") {
+                    resetTyping();
+                }
+
+            } else if (state === 'VIDEO_MODE') {
+                videoMesh.visible = true;
+                particleSystem.scale.lerp(new THREE.Vector3(1,1,1), 0.05);
+                particleSystem.rotation.y += 0.005;
+
+                if (videoMesh.material.opacity < 1) videoMesh.material.opacity += 0.03;
+                if (videoElement.paused) videoElement.play();
+                videoMesh.position.z = Math.sin(time) * 2;
+
+                // Bắt đầu gõ chữ khi video hiện
+                if (!isTyping && videoMesh.material.opacity > 0.8) {
+                    isTyping = true;
+                    typeWriter();
+                }
+            }
+            renderer.render(scene, camera);
+        }
+
+        // ==========================================
+        // 5. XỬ LÝ KHỞI ĐỘNG & AI
+        // ==========================================
+        function startSystem() {
+            if (isSystemStarted) return;
+            isSystemStarted = true;
+
+            // Hiệu ứng mờ màn hình chờ
+            const startScreen = document.getElementById('start-screen');
+            startScreen.style.opacity = 0;
+            setTimeout(() => { startScreen.style.display = 'none'; }, 1000);
+
+            // Hiện UI chính
+            document.getElementById('ui-layer').style.display = 'block';
+            document.getElementById('camera-preview').style.display = 'block';
+
+            bgMusic.play().catch(e => console.log("Music play blocked"));
+            
+            init3D();
+            setupCamera();
+        }
+
+        function setupCamera() {
+            const video = document.getElementsByClassName('input_video')[0];
+            const canvas = document.getElementById('camera-preview');
+            const ctx = canvas.getContext('2d');
+            
+            const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+            hands.setOptions({ maxNumHands: 1, modelComplexity: 0, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
+
+            hands.onResults(results => {
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                ctx.drawImage(results.image, 0, 0, canvas.width, canvas.height);
+                
+                if (results.multiHandLandmarks.length > 0) {
+                    const lm = results.multiHandLandmarks[0];
+                    // Logic Like 👍
+                    const isThumbUp = lm[4].y < lm[3].y;
+                    const isIndexFolded = lm[8].y > lm[6].y && lm[12].y > lm[10].y;
+
+                    if (isThumbUp && isIndexFolded) {
+                        state = 'VIDEO_MODE';
+                    } else {
+                        state = 'HEART_IDLE';
+                    }
+                } else {
+                    state = 'HEART_IDLE';
+                }
+            });
+            
+            const cameraUtils = new Camera(video, {
+                onFrame: async () => { await hands.send({image: video}); }, width: 320, height: 240
+            });
+            cameraUtils.start();
+        }
+
+        window.addEventListener('resize', () => {
+            if(camera) { 
+                camera.aspect = window.innerWidth/window.innerHeight; 
+                camera.updateProjectionMatrix(); 
+                renderer.setSize(window.innerWidth, window.innerHeight);
+                updateCameraPosition(); 
+            }
+        });
+    </script>
+</body>
+</html>
